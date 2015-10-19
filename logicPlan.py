@@ -23,6 +23,7 @@ import sys
 import logic
 import game
 import time
+import math
 
 pacman_str = 'P'
 ghost_pos_str = 'G'
@@ -459,8 +460,9 @@ def pacmanAliveSuccessorStateAxioms(x, y, t, num_ghosts):
     clauses = [~logic.PropSymbolExpr(pacman_alive_str, t - 1)]
     for g in ghost_strs:
         p_alive = logic.PropSymbolExpr(pacman_alive_str, t - 1)
-        S2 = ((p_alive & logic.PropSymbolExpr(g, x, y, t - 1) & logic.PropSymbolExpr(pacman_str, x, y, t)) | (
-            p_alive & logic.PropSymbolExpr(g, x, y, t) & logic.PropSymbolExpr(pacman_str, x, y, t)))
+        # S2 = ((p_alive & logic.PropSymbolExpr(g, x, y, t - 1) & logic.PropSymbolExpr(pacman_str, x, y, t)) | (
+        #     p_alive & logic.PropSymbolExpr(g, x, y, t) & logic.PropSymbolExpr(pacman_str, x, y, t)))
+        S2 = (p_alive & logic.PropSymbolExpr(pacman_str, x, y, t) & (logic.PropSymbolExpr(g, x, y, t - 1) | logic.PropSymbolExpr(g, x, y, t)))
 
         clauses.append(S2)
     dead = logic.Expr("<=>", clause_left, logic.disjoin(clauses))
@@ -491,6 +493,18 @@ def get_blocked_positions(walls, width, height):
             blocked_east.append((x - 1, y))
     return [blocked_east, blocked_west]
 
+# Return heuristic of given foods and pac_starting position:
+
+def foodHeur(foods, pac_start):
+
+    x = pac_start[0]
+    y = pac_start[1]
+    curr = len(foods)
+    for f in foods:
+        man_dis = math.sqrt(math.pow((f[0] - x), 2) + math.pow((f[1] - y), 2))
+        if curr < man_dis:
+            curr = man_dis
+    return curr
 
 def foodGhostLogicPlan(problem):
     """
@@ -501,8 +515,6 @@ def foodGhostLogicPlan(problem):
     Available actions are game.Directions.{NORTH,SOUTH,EAST,WEST}
     Note that STOP is not an available action.
     """
-    func_start_time = time.time() #DEBUG: timing
-
 
     walls = problem.walls
     width, height = problem.getWidth(), problem.getHeight()
@@ -518,8 +530,8 @@ def foodGhostLogicPlan(problem):
     max_steps = 50
 
     foods = food_state.asList()
-    # ghost position:
 
+    food_h = foodHeur(foods, pac_state)
     # Get the blocked positions and pass them into ghostDirectionSSA function
     blocked = get_blocked_positions(walls, width, height)
     blocked_east = blocked[0]
@@ -532,22 +544,33 @@ def foodGhostLogicPlan(problem):
     ghost_init_pos = []
     ghost_init_direction = []
     ghost_num = 0
-
+    ghost_row_y = []
+    blocked_dict = {}
 
     for g in ghost_start_state:
         pos = g.getPosition()
         pos_str = ghost_pos_str + str(ghost_num)
-        # Make sure that each ghost is only in its own position?
+        ghost_row_y.append(pos[1])
         ghost_init_pos.append(logic.PropSymbolExpr(pos_str, pos[0], pos[1], 0))
+        # Can only be in one spot at a row
+
+        # Can only block ghost at the row where ghost is at
+        east_for_g = []
+        west_for_g = []
+        for e in blocked_east:
+            if e[1] == pos[1]:
+                east_for_g.append(e)
+        for w in blocked_west:
+            if w[1] == pos[1]:
+                west_for_g.append(w)
+        blocked_dict[ghost_num] = [east_for_g, west_for_g]
+
         for x in range(1, height + 1):
-            for y in range(1, width + 1):
-                if x == pos[0] and y == pos[1]:
-                    continue
-                else:
-                    not_pos = ~logic.PropSymbolExpr(pos_str, x, y, 0)
-                    ghost_init_pos.append(not_pos)
+            if x != pos[0]:
+                ghost_init_pos.append(~logic.PropSymbolExpr(pos_str, x, pos[1], 0))
 
         east_str = ghost_east_str + str(ghost_num)
+        # Heading East or Heading West if in blockedEast
         if (pos[0], pos[1]) in blocked_east:
             init_direc = ~logic.PropSymbolExpr(east_str, 0)
         else:
@@ -555,42 +578,25 @@ def foodGhostLogicPlan(problem):
         ghost_init_direction.append(init_direc)
         ghost_num += 1
 
-
-    time1 = time.time() - func_start_time #DEBUG
-    print("--- %s sec first for loop---" % (time1))#DEBUG
-
-    time2 = time.time()
-
-
-    ghost_starting_expr = logic.Expr("&", logic.conjoin(ghost_init_pos), logic.conjoin(ghost_init_direction))
+    ghost_starting_expr = logic.conjoin(ghost_init_pos + ghost_init_direction)
 
     # Pacman has to be at start_state at 0
     s = logic.PropSymbolExpr(pacman_str, pac_state[0], pac_state[1], 0)
 
     # And Can only be at exactly one spot
     not_states = []
-
-
     for x in range(1, width + 1):
         for y in range(1, height + 1):
             if (x, y) != pac_state:
                 not_states.append(~logic.PropSymbolExpr(pacman_str, x, y, 0))
 
-    print("--- %s sec second for loop---" % (time.time() - time2))#DEBUG
-
-
     ssas_dict = {}
-
-    big_for_start_time = time.time() #DEBUG: timing
-
     for t in range(1, max_steps + 1):
-        print t
-        ts_start = time.time()
 
         # Pacman is alive initially
         exprs = [logic.PropSymbolExpr(pacman_alive_str, 0)]
         # Ghost has to be in their initial states
-        exprs.append(logic.to_cnf(ghost_starting_expr))
+        exprs.append(ghost_starting_expr)
 
         # Get Goals:
         # 1. Getting all the food
@@ -609,33 +615,34 @@ def foodGhostLogicPlan(problem):
         # SSAs of time = t
         ghost_ssa = []
         pac_ssa = []
+        direc_test = []
+        gpos_test = []
+        for which_ghost in range(num_ghosts):
+            blocked_east = blocked_dict[which_ghost][0]
+            blocked_west = blocked_dict[which_ghost][1]
+            direc_ssa = ghostDirectionSuccessorStateAxioms(t, which_ghost, blocked_west, blocked_east)
+            ghost_ssa.append(logic.to_cnf(direc_ssa))
 
-        ts_1 = time.time()
+            direc_test.append(direc_ssa)
 
         # get SSA of all location and put them into cnf
         for x in range(1, width + 1):
             for which_ghost in range(num_ghosts):
                 ghost_y = ghost_start_state[which_ghost].getPosition()[1]
-                pos_str = ghost_pos_str + str(which_ghost)
                 pos_ssa = ghostPositionSuccessorStateAxioms(x, ghost_y, t, which_ghost, walls)
-                direc_ssa = ghostDirectionSuccessorStateAxioms(t, which_ghost, blocked_west, blocked_east)
-                ghost_ssa.append(logic.Expr("&", logic.to_cnf(pos_ssa), logic.to_cnf(direc_ssa)))
-                for y in range(1, height + 1):
-                    if ghost_y == y:
-                        continue
-                    else:
-                        not_pos = ~logic.PropSymbolExpr(pos_str, x, y, t)
-                        ghost_ssa.append(not_pos)
+
+                # Add CNF
+                ghost_ssa.append(logic.to_cnf(pos_ssa))
+                gpos_test.append(pos_ssa)
 
             #  pacman stuff
             for y in range(1, height+1):
                 pac_trans = pacmanSuccessorStateAxioms(x, y, t, walls)
-                pac_alive = pacmanAliveSuccessorStateAxioms(x, y, t, num_ghosts)
-                pac_ssa.append(logic.Expr("&", logic.to_cnf(pac_trans), logic.to_cnf(pac_alive)))
-
-
-        ts_2 = time.time()
-
+                if y in ghost_row_y:
+                    pac_alive = pacmanAliveSuccessorStateAxioms(x, y, t, num_ghosts)
+                    pac_ssa.append(logic.to_cnf(pac_alive))
+                # Add CNF
+                pac_ssa.append(logic.to_cnf(pac_trans))
 
         # can take exactly one action at time t
         acts = []
@@ -652,12 +659,7 @@ def foodGhostLogicPlan(problem):
         else:
             ssas_dict[t] = logic.Expr("&", ssas_t, ssas_dict[t-1])
 
-        ts_3 = time.time()
-
-        print "The time of getting SSA at t = {} : {}".format(t, ts_2-ts_1)
-
-        if t < (len(foods)):
-            print "hi"
+        if t < food_h:
             continue
 
         # This is All SSAs from 1 to time t
@@ -680,28 +682,10 @@ def foodGhostLogicPlan(problem):
 
         # check if the model is true repeatedly for each t to get optimal solution
 
-        ts_4 = time.time()
-
         model = logic.pycoSAT(exprs_con)
-
-        ts_5 = time.time()
-
-        # print model
-
         if model:
             action_seq = extractActionSequence(model, legal_actions)
             return action_seq
-
-        print("--- %s sec ts1-ts_start---" % (ts_1- ts_start))#DEBUG
-        print("--- %s sec ts2-ts_1---" % (ts_2 - ts_1))#DEBUG
-        print("--- %s sec ts3-ts_2---" % (ts_3 - ts_2))#DEBUG
-        print("--- %s sec ts4-ts_3---" % (ts_4 - ts_3))#DEBUG
-        print("--- %s sec ts5-ts_4---" % (ts_5 - ts_4))#DEBUG
-
-
-    print("--- %s sec third huge for loop---" % (time.time() - big_for_start_time))#DEBUG
-    print("--- %s sec func runtime---" % (time.time() - func_start_time))#DEBUG
-
     return []
 
 # Abbreviations
